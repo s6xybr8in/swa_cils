@@ -1,7 +1,7 @@
 # Centralized Integration Login System
 
 ## 프로젝트 구조(Project Structure)
-
+```text
 CILS/
 │
 ├── README.md
@@ -42,8 +42,8 @@ CILS/
 │   └── scenarios/
 │
 └── scripts/                     # 개발 및 배포 자동화
+```
 
---- 
 
 ## Commit Convention
 
