@@ -1,0 +1,108 @@
+
+@startuml
+title CILS - OIDC 로그인 DCD
+
+left to right direction
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+hide empty members
+
+package "인가 처리" {
+    class AuthorizationService {
+        + validateRequest(request)
+        + issueAuthorizationCode(user, request)
+    }
+
+    class AuthorizationRequest {
+        - clientId: String
+        - redirectUri: String
+        - scope: String
+        - state: String
+        - nonce: String
+        - codeChallenge: String
+    }
+
+    class AuthorizationCode {
+        - code: String
+        - userId: UUID
+        - clientId: String
+        - expiresAt: Instant
+        - consumed: boolean
+    }
+}
+
+package "사용자 인증" {
+    class AuthenticationService {
+        + authenticate(loginId, password)
+    }
+
+    class SsoSessionService {
+        + findValidSession(sessionId)
+        + createSession(user)
+    }
+
+    class User {
+        - id: UUID
+        - loginId: String
+        - passwordHash: String
+        - enabled: boolean
+    }
+
+    class SsoSession {
+        - sessionId: String
+        - userId: UUID
+        - expiresAt: Instant
+    }
+}
+
+package "토큰 처리" {
+    class TokenService {
+        + exchangeCode(request)
+        + validateCode(code)
+    }
+
+    class TokenIssuer {
+        + issueIdToken(user, client)
+        + issueAccessToken(user, client)
+    }
+
+    class TokenRequest {
+        - code: String
+        - clientId: String
+        - redirectUri: String
+        - codeVerifier: String
+    }
+
+    class TokenResponse {
+        - idToken: String
+        - accessToken: String
+        - tokenType: String
+        - expiresIn: long
+    }
+}
+
+package "저장소" {
+    class UserRepository
+    class SsoSessionRepository
+    class AuthorizationCodeRepository
+    class ClientRepository
+}
+
+AuthorizationService --> AuthorizationRequest
+AuthorizationService --> AuthorizationCode
+AuthorizationService --> ClientRepository
+AuthorizationService --> SsoSessionService
+
+AuthenticationService --> UserRepository
+AuthenticationService --> User
+
+SsoSessionService --> SsoSessionRepository
+SsoSessionService --> SsoSession
+
+TokenService --> AuthorizationCodeRepository
+TokenService --> ClientRepository
+TokenService --> TokenIssuer
+TokenService --> TokenRequest
+TokenService --> TokenResponse
+
+@enduml

@@ -1,0 +1,91 @@
+
+@startuml
+title CILS - OIDC 로그인 Sequence Diagram
+
+autonumber
+
+actor "사용자" as User
+participant "웹 브라우저" as Browser
+participant "Client Application\n(Spring Boot)" as Client
+
+box "CILS (OIDC 인증 서버)" #EAF2F8
+    participant "Authorization Endpoint" as AuthEndpoint
+    participant "사용자 인증 서비스" as AuthService
+    participant "SSO 세션 관리" as SSO
+    participant "Token Endpoint" as TokenEndpoint
+    participant "토큰 발급 서비스" as TokenService
+end box
+
+database "사용자 저장소" as UserDB
+database "Client 등록 정보" as ClientDB
+database "SSO 세션 저장소" as SessionDB
+
+== 로그인 요청 ==
+
+User -> Browser : 로그인 선택
+Browser -> Client : 로그인 요청
+Client -> Client : state, nonce,\nPKCE 생성
+Client --> Browser : 302 Redirect (Authorization URL)
+Browser -> AuthEndpoint : Authorization Request\n(client_id, redirect_uri, scope,\nstate, nonce, code_challenge)
+
+== 인증 요청 검증 ==
+
+AuthEndpoint -> ClientDB : Client 등록 정보 조회
+ClientDB --> AuthEndpoint : Client 정보
+AuthEndpoint -> AuthEndpoint : client_id, redirect_uri,\nscope, PKCE 요청 검증
+
+== 사용자 인증 및 SSO 확인 ==
+
+AuthEndpoint -> SSO : 기존 SSO 세션 확인
+SSO -> SessionDB : 세션 조회
+SessionDB --> SSO : 세션 정보
+SSO --> AuthEndpoint : 세션 유효성 결과
+
+alt 유효한 SSO 세션 존재
+    AuthEndpoint -> AuthEndpoint : 기존 인증 상태 활용
+else 유효한 SSO 세션 없음
+    AuthEndpoint --> Browser : 로그인 페이지 응답
+    User -> Browser : ID / Password 입력
+    Browser -> AuthService : 로그인 정보 제출
+    AuthService -> UserDB : 사용자 자격 증명 검증
+    UserDB --> AuthService : 검증 결과
+
+    alt 인증 성공
+        AuthService -> SSO : SSO 세션 생성
+        SSO -> SessionDB : 세션 저장
+        SessionDB --> SSO : 저장 완료
+        SSO --> Browser : SSO 세션 쿠키 설정
+    else 인증 실패
+        AuthService --> Browser : 인증 실패 응답
+        Browser --> User : 로그인 실패 안내
+    end
+end
+
+== 인가 코드 발급 ==
+
+opt 인증 완료
+    AuthEndpoint -> AuthEndpoint : Authorization Code 생성
+    AuthEndpoint --> Browser : 302 Redirect\n(redirect_uri?code=...&state=...)
+    Browser -> Client : Authorization Code 전달
+
+    == 인가 코드 교환 ==
+
+    Client -> Client : state 검증
+    Client -> TokenEndpoint : Token Request\n(code, redirect_uri,\ncode_verifier, client authentication)
+
+    TokenEndpoint -> TokenEndpoint : 인가 코드 유효성 검증\nPKCE 검증 및 일회성 사용 처리
+    TokenEndpoint -> TokenService : 토큰 발급 요청
+
+    TokenService -> TokenService : ID Token / Access Token 생성
+    TokenService --> TokenEndpoint : 발급된 토큰
+    TokenEndpoint --> Client : ID Token + Access Token
+
+    == Client 로그인 완료 ==
+
+    Client -> Client : ID Token 서명 및 Claims 검증\n(issuer, audience, nonce, exp)
+    Client -> Client : 애플리케이션 세션 생성
+    Client --> Browser : 세션 쿠키 설정 및 서비스 Redirect
+    Browser --> User : 로그인 완료
+end
+
+@enduml

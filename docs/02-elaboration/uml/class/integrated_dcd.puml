@@ -1,0 +1,499 @@
+@startuml CILS_Integrated_DCD
+title CILS 통합 설계 클래스 다이어그램\nOIDC 로그인 · 역할/권한 관리 · 로그아웃/세션 무효화
+
+top to bottom direction
+skinparam defaultFontName "Noto Sans CJK KR"
+skinparam defaultFontSize 12
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam linetype polyline
+skinparam nodesep 35
+skinparam ranksep 65
+skinparam wrapWidth 220
+skinparam ArrowColor #64748B
+skinparam packageBorderColor #94A3B8
+skinparam classBorderColor #475569
+skinparam classBackgroundColor #FFFFFF
+skinparam classBackgroundColor<<SS>> #DBEAFE
+skinparam classBackgroundColor<<AS>> #DBEAFE
+skinparam classBackgroundColor<<EXT>> #FEF3C7
+skinparam classBackgroundColor<<PORT>> #F1F5F9
+hide empty members
+set namespaceSeparator none
+
+' Framework types are defined once. Hidden links below fix the upper layer.
+package "① 프레임워크 제공 객체 — 직접 구현하지 않음" as Framework #EFF6FF {
+  package "Spring Security | 인증·로그아웃" as Security {
+    interface AuthenticationManager <<SS>> {
+      +authenticate(authentication): Authentication
+    }
+    class ProviderManager <<SS>>
+    class DaoAuthenticationProvider <<SS>>
+    interface UserDetailsService <<SS>> {
+      +loadUserByUsername(loginId): UserDetails
+    }
+    interface PasswordEncoder <<SS>>
+    interface AuthenticationSuccessHandler <<SS>> {
+      +onAuthenticationSuccess(req, res, authentication): void
+    }
+    class LogoutFilter <<SS>>
+    interface LogoutHandler <<SS>> {
+      +logout(req, res, authentication): void
+    }
+    class SecurityContextLogoutHandler <<SS>>
+    class CookieClearingLogoutHandler <<SS>>
+    ProviderManager ..|> AuthenticationManager
+    ProviderManager --> DaoAuthenticationProvider : providers 일부
+    DaoAuthenticationProvider --> UserDetailsService
+    DaoAuthenticationProvider --> PasswordEncoder
+    LogoutFilter --> "1..*" LogoutHandler
+    SecurityContextLogoutHandler ..|> LogoutHandler
+    CookieClearingLogoutHandler ..|> LogoutHandler
+  }
+
+  package "Authorization Server | OAuth 2.0 / OIDC" as AuthorizationServer {
+    class OAuth2AuthorizationEndpointFilter <<AS>>
+    class OAuth2TokenEndpointFilter <<AS>>
+    interface OAuth2AuthorizationService <<AS>> {
+      +save(authorization): void
+      +remove(authorization): void
+      +findById(id): OAuth2Authorization
+      +findByToken(token, type): OAuth2Authorization
+    }
+    class OAuth2Authorization <<AS>> {
+      -id: String
+      -registeredClientId: String
+      -principalName: String
+      -authorizedScopes: Set<String>
+      -tokens: Map
+    }
+    interface RegisteredClientRepository <<AS>> {
+      +findByClientId(clientId): RegisteredClient
+    }
+    class RegisteredClient <<AS>>
+    class JwtGenerator <<AS>>
+    interface "OAuth2TokenCustomizer<JwtEncodingContext>" as JwtCustomizer <<AS>> {
+      +customize(context): void
+    }
+    interface JwtEncoder <<SS>>
+    OAuth2AuthorizationEndpointFilter --> AuthenticationSuccessHandler : response handler
+    OAuth2AuthorizationService ..> OAuth2Authorization
+    RegisteredClientRepository ..> RegisteredClient
+    JwtGenerator --> JwtCustomizer
+    JwtGenerator --> JwtEncoder
+  }
+  note bottom of AuthorizationServer
+    인가 코드 검증·교환, PKCE, refresh grant, 서명·응답은 프레임워크 담당.
+    필터 내부의 AuthenticationProvider/Converter 및 기본 구현은 생략.
+    AS = Authorization Server 기능 (사용 버전에 맞는 모듈 구성 필요).
+  end note
+}
+
+package "② CILS — 직접 구현하는 클래스 및 프레임워크 확장" as CILS #F8FAFC {
+  package "A. 로그인·OIDC 연결" as Login #FFFBEB {
+    class LoginSuccessHandler <<EXT>> {
+      +onAuthenticationSuccess(req, res, authentication): void
+    }
+    class AuthorizationSuccessHandler <<EXT>> {
+      +onAuthenticationSuccess(req, res, authentication): void
+    }
+    class AccessTokenCustomizer <<EXT>> {
+      +customize(context): void
+    }
+    note bottom of AccessTokenCustomizer
+      code 교환·refresh 모두 현재 계정/클라이언트/세션 확인.
+      access token: 현재 roles/permissions/aud/sid 반영.
+      ID token: 같은 sid 반영, 업무 권한은 넣지 않음.
+    end note
+  }
+
+  package "B. 사용자·클라이언트 공통 조회" as Catalog #F0FDFA {
+    interface IdentityApi <<PORT>> {
+      +getAccount(subjectId): AccountSnapshot
+    }
+    class IdentityService {
+      +getAccount(subjectId): AccountSnapshot
+    }
+    class UserDetailsServiceAdapter <<EXT>> {
+      +loadUserByUsername(loginId): UserDetails
+    }
+    interface UserRepository <<PORT>> {
+      +findById(subjectId): User
+      +findByLoginId(loginId): User
+    }
+    class User {
+      -id: UUID
+      -loginId: String
+      -passwordHash: String
+      -enabled: boolean
+    }
+    interface ClientApi <<PORT>> {
+      +getApplication(applicationId): ApplicationSnapshot
+      +resolveClient(clientId): ClientSnapshot
+      +findLogoutUri(clientId): URI
+    }
+    class ClientService {
+      +getApplication(applicationId): ApplicationSnapshot
+      +resolveClient(clientId): ClientSnapshot
+      +findLogoutUri(clientId): URI
+    }
+    interface ApplicationRepository <<PORT>> {
+      +findById(applicationId): Application
+    }
+    class Application {
+      -applicationId: UUID
+      -name: String
+      -enabled: boolean
+      -allowedAudiences: Set<String>
+    }
+    note bottom of ClientService
+      프로토콜 등록은 RegisteredClientRepository 하나로 통합.
+      applicationId, backchannel_logout_uri는
+      RegisteredClient의 custom settings로 연결.
+      Application은 권한 관리의 소유 경계이며 client와 구별.
+    end note
+  }
+
+  package "C. 세션 생성·조회·무효화" as Sessions #F0FDFA {
+    class SessionService {
+      +createSession(subjectId, httpSessionId): AuthSession
+      +findValidSession(sessionId): AuthSession
+      +registerParticipant(sessionId, clientId): void
+      +invalidate(sessionId, reason): void
+      +invalidateAllOf(subjectId, reason): void
+    }
+    class AuthSession {
+      -sessionId: String
+      -httpSessionId: String
+      -subjectId: UUID
+      -expiresAt: Instant
+      -active: boolean
+      -participants: Set<String>
+      +invalidate(reason): void
+      +isActive(now): boolean
+    }
+    interface AuthSessionRepository <<PORT>> {
+      +save(session): void
+      +findById(sessionId): AuthSession
+      +findAllBySubjectId(subjectId): List<AuthSession>
+      +invalidateAndLoad(sessionId, reason): AuthSession
+    }
+    class RedisAuthSessionRepository
+    interface HttpSessionInvalidator <<PORT>> {
+      +invalidate(httpSessionId): void
+    }
+    class SsoLogoutHandler <<EXT>> {
+      +logout(req, res, authentication): void
+    }
+    class AdminSessionController {
+      +forceLogout(actor, subjectId): Response
+    }
+    class SessionExpiryHandler {
+      +onExpired(event): void
+    }
+    enum InvalidationReason {
+      USER_LOGOUT
+      ADMIN_FORCED
+      EXPIRED
+      ROLE_CHANGED
+    }
+    interface SessionInvalidationListener <<PORT>> {
+      +onInvalidated(session, reason): void
+    }
+    note bottom of SessionService
+      SsoSessionService + SessionInvalidationService를 통합.
+      active=false 전환은 원자적·멱등적 처리.
+      삭제/TTL 만료 후에도 참가 client 목록을 읽을 수 있도록
+      snapshot 또는 tombstone을 보존하고 실패 처리를 재시도.
+      원격 강제 종료는 실제 HTTP 세션도 폐기해야 함.
+    end note
+  }
+
+  package "D. 역할·권한 관리" as Permissions #F0FDFA {
+    class PermissionManagementEndpoint {
+      +registerPermission(request): Response
+      +defineRole(request): Response
+      +updateRolePermissions(request): Response
+      +updateUserRoles(request): Response
+    }
+    interface AuthorizationApi <<PORT>> {
+      +registerPermission(actor, appId, definition): PermissionView
+      +defineRole(actor, appId, definition): RoleView
+      +replaceRolePermissions(actor, appId, roleId, permissionIds): void
+      +replaceUserRoles(actor, appId, subjectId, roleIds): void
+      +resolveAccess(subjectId, appId, audience, scopes): AccessSnapshot
+    }
+    class PermissionService {
+      +registerPermission(actor, appId, definition): PermissionView
+      +defineRole(actor, appId, definition): RoleView
+      +replaceRolePermissions(actor, appId, roleId, permissionIds): void
+      +replaceUserRoles(actor, appId, subjectId, roleIds): void
+      +resolveAccess(subjectId, appId, audience, scopes): AccessSnapshot
+    }
+    class Permission {
+      -permissionId: UUID
+      -applicationId: UUID
+      -code: String
+      -description: String
+    }
+    class Role {
+      -roleId: UUID
+      -applicationId: UUID
+      -name: String
+      -permissionIds: Set<UUID>
+      -version: long
+      +replacePermissions(ids): void
+    }
+    class UserRoleAssignment {
+      -applicationId: UUID
+      -subjectId: UUID
+      -roleIds: Set<UUID>
+      -version: long
+      +replaceRoles(ids): void
+    }
+    class AccessSnapshot <<DTO>> {
+      +applicationId: UUID
+      +subjectId: UUID
+      +audience: String
+      +roles: Set<String>
+      +permissions: Set<String>
+    }
+    interface PermissionRepository <<PORT>> {
+      +findByIds(appId, ids): List<Permission>
+      +save(permission): void
+    }
+    interface RoleRepository <<PORT>> {
+      +findById(appId, id): Role
+      +findByIds(appId, ids): List<Role>
+      +save(role): void
+    }
+    interface AssignmentRepository <<PORT>> {
+      +find(appId, subjectId): UserRoleAssignment
+      +save(assignment): void
+    }
+    class AuthorizationPersistenceAdapter
+    class ActorContext <<DTO>> {
+      +subjectId: UUID
+      +authorities: Set<String>
+      +managedApplicationIds: Set<UUID>
+    }
+    note bottom of PermissionService
+      원본 Auth.puml의 AuthorizationService를 명확히 개명.
+      관리 권한·application 소유권·참조 ID의 소속을 검증.
+      변경과 감사 기록은 동일 DB 트랜잭션으로 커밋.
+      version으로 동시 변경 유실 방지.
+      권한 변경은 다음 토큰 발급부터 반영하는 원본 정책 유지.
+      즉시 세션 종료(ROLE_CHANGED)는 선택 정책, 자동 호출 아님.
+    end note
+  }
+
+  package "E. 토큰 폐기·로그아웃 전파·공통 감사" as Propagation #FFF7ED {
+    interface GrantSessionIndex <<PORT>> {
+      +bind(authorizationId, sessionId): void
+      +findSessionId(authorizationId): String
+      +findAuthorizationIds(sessionId): Set<String>
+    }
+    interface TokenStore <<PORT>> {
+      +revokeAllBySession(sessionId): void
+    }
+    class AuthorizationTokenStoreAdapter {
+      +revokeAllBySession(sessionId): void
+    }
+    class TokenRevocationListener {
+      +onInvalidated(session, reason): void
+    }
+    class BackChannelLogoutNotifier {
+      +onInvalidated(session, reason): void
+    }
+    class InvalidationAuditLogger {
+      +onInvalidated(session, reason): void
+    }
+    interface AuditApi <<PORT>> {
+      +append(event: AuditEvent): void
+    }
+    class AuditEvent <<DTO>> {
+      +eventId: UUID
+      +actorId: String
+      +applicationId: UUID
+      +action: String
+      +targetId: String
+      +outcome: String
+      +occurredAt: Instant
+      +correlationId: String
+    }
+    interface LogoutNotificationOutbox <<PORT>> {
+      +enqueue(notification): void
+      +findDue(now): List<PendingNotification>
+      +save(notification): void
+    }
+    class PendingNotification {
+      -notificationId: UUID
+      -clientId: String
+      -logoutUri: URI
+      -sessionId: String
+      -subjectId: UUID
+      -attempts: int
+      -nextRetryAt: Instant
+      -status: NotificationStatus
+      +markSent(): void
+      +recordFailure(now): void
+    }
+    enum NotificationStatus {
+      PENDING
+      SENT
+      FAILED
+    }
+    class LogoutNotificationDispatcher {
+      -http: RestClient
+      +dispatch(): void
+      -createLogoutToken(notification): String
+    }
+    interface FailureAlerter <<PORT>> {
+      +alert(notification): void
+    }
+    note bottom of AuthorizationTokenStoreAdapter
+      GrantSessionIndex로 sid에 속한 authorization을 찾아 폐기.
+      OAuth2AuthorizationService에는 세션별 일괄 폐기 API가 없음.
+      이미 발급한 JWT를 오프라인 검증하는 앱에는
+      저장소 폐기만으로 즉시 접근 차단이 되지 않음.
+    end note
+    note bottom of LogoutNotificationDispatcher
+      Logout Token: iss / aud / iat / jti / sub / sid / events.
+      nonce는 넣지 않음. 신뢰된 등록 URI로 전송.
+      재시도 간격: 10초 → 1분 → 5분 → 5분.
+      총 5회 실패 시 FAILED 및 운영 알림.
+      RestClient는 Spring Framework 제공 (Security 객체 아님).
+    end note
+  }
+}
+
+package "③ 연동 애플리케이션 — CILS 외부" as RP #F1F5F9 {
+  interface JwtDecoder <<SS>>
+  class AccessTokenValidator {
+    +validate(accessToken): VerifiedAccess
+  }
+  class PermissionEnforcer {
+    +requirePermission(access, permission): void
+    +checkBusinessRules(subjectId, resource): void
+  }
+  class BackChannelLogoutEndpoint {
+    +logout(logoutToken): Response
+  }
+  AccessTokenValidator --> JwtDecoder
+  PermissionEnforcer --> AccessTokenValidator
+  BackChannelLogoutEndpoint --> JwtDecoder : Logout Token 전용 검증
+  note bottom of BackChannelLogoutEndpoint
+    서명·issuer·audience·events·jti/재전송을 검증한 뒤
+    iss + sid로 로컬 로그인 세션 종료.
+    CILS 도메인/저장소에는 직접 의존하지 않음.
+    JwtDecoder는 이 별도 배포 앱의 Spring Security 객체.
+  end note
+}
+
+' Login and framework extension points
+LoginSuccessHandler .[norank].|> AuthenticationSuccessHandler
+AuthorizationSuccessHandler .[norank].|> AuthenticationSuccessHandler
+SsoLogoutHandler .[norank].|> LogoutHandler
+UserDetailsServiceAdapter .[norank].|> UserDetailsService
+AccessTokenCustomizer .[norank].|> JwtCustomizer
+LoginSuccessHandler -[norank]-> SessionService
+AuthorizationSuccessHandler -[norank]-> SessionService : 참가 client 등록
+AuthorizationSuccessHandler -[norank]-> OAuth2AuthorizationService : code로 authorization 조회
+AuthorizationSuccessHandler -[norank]-> GrantSessionIndex : authorizationId ↔ sid
+AccessTokenCustomizer -[norank]-> AuthorizationApi : 현재 권한 조회
+AccessTokenCustomizer -[norank]-> IdentityApi
+AccessTokenCustomizer -[norank]-> ClientApi
+AccessTokenCustomizer -[norank]-> GrantSessionIndex
+AccessTokenCustomizer -[norank]-> SessionService : 활성 세션 검증
+AccessTokenCustomizer .[norank].> AccessSnapshot
+
+' Identity and client: single source of truth per responsibility
+IdentityService ..|> IdentityApi
+IdentityService --> UserRepository
+UserDetailsServiceAdapter --> UserRepository
+UserRepository ..> User
+ClientService ..|> ClientApi
+ClientService -[norank]-> RegisteredClientRepository
+ClientService --> ApplicationRepository
+ApplicationRepository ..> Application
+
+' Session lifecycle shared by every entry point
+SsoLogoutHandler --> SessionService
+AdminSessionController --> SessionService
+AdminSessionController .[norank].> ActorContext : 관리자 권한 확인
+SessionExpiryHandler --> SessionService
+SessionService --> AuthSessionRepository
+SessionService --> HttpSessionInvalidator
+SessionService --> "0..*" SessionInvalidationListener : 공통 후속 처리
+SessionService ..> InvalidationReason
+AuthSessionRepository ..> AuthSession
+RedisAuthSessionRepository ..|> AuthSessionRepository
+AuthSession ..> InvalidationReason
+
+' RBAC, module boundaries, and audit
+PermissionManagementEndpoint --> AuthorizationApi
+PermissionService ..|> AuthorizationApi
+PermissionService --> PermissionRepository
+PermissionService --> RoleRepository
+PermissionService --> AssignmentRepository
+PermissionService -[norank]-> IdentityApi
+PermissionService -[norank]-> ClientApi
+PermissionService -[norank]-> AuditApi
+PermissionService ..> ActorContext
+PermissionService ..> AccessSnapshot : create
+AuthorizationPersistenceAdapter ..|> PermissionRepository
+AuthorizationPersistenceAdapter ..|> RoleRepository
+AuthorizationPersistenceAdapter ..|> AssignmentRepository
+PermissionRepository ..> Permission
+RoleRepository ..> Role
+AssignmentRepository ..> UserRoleAssignment
+Role "0..*" -- "0..*" Permission : includes (ID 참조)
+UserRoleAssignment "0..*" -[norank]-> "0..*" Role : assigns (ID 참조)
+
+' All invalidation paths share revocation, notification, and audit
+TokenRevocationListener .[norank].|> SessionInvalidationListener
+BackChannelLogoutNotifier .[norank].|> SessionInvalidationListener
+InvalidationAuditLogger .[norank].|> SessionInvalidationListener
+TokenRevocationListener --> TokenStore
+AuthorizationTokenStoreAdapter ..|> TokenStore
+AuthorizationTokenStoreAdapter -[norank]-> OAuth2AuthorizationService
+AuthorizationTokenStoreAdapter --> GrantSessionIndex
+BackChannelLogoutNotifier -[norank]-> ClientApi
+BackChannelLogoutNotifier --> LogoutNotificationOutbox
+BackChannelLogoutNotifier ..> PendingNotification : create
+InvalidationAuditLogger --> AuditApi
+AuditApi ..> AuditEvent
+LogoutNotificationDispatcher --> LogoutNotificationOutbox
+LogoutNotificationDispatcher -[norank]-> JwtEncoder
+LogoutNotificationDispatcher --> FailureAlerter
+LogoutNotificationDispatcher ..> PendingNotification
+LogoutNotificationOutbox ..> PendingNotification
+PendingNotification --> NotificationStatus
+LogoutNotificationDispatcher .[norank].> BackChannelLogoutEndpoint : HTTPS (logout_token)
+
+
+' Hidden edges are layout constraints only; actual types anchor each layer.
+PasswordEncoder -[hidden]down-> LoginSuccessHandler
+RegisteredClient -[hidden]down-> ClientService
+AuthenticationManager -[hidden]right-> OAuth2AuthorizationEndpointFilter
+LoginSuccessHandler -[hidden]right-> UserDetailsServiceAdapter
+UserRepository -[hidden]down-> SessionService
+ClientService -[hidden]down-> PermissionManagementEndpoint
+SessionService -[hidden]right-> PermissionManagementEndpoint
+AuthSession -[hidden]down-> TokenRevocationListener
+Permission -[hidden]down-> InvalidationAuditLogger
+PendingNotification -[hidden]down-> BackChannelLogoutEndpoint
+
+legend bottom
+  |= 표시 |= 의미 |
+  | <#DBEAFE> SS / AS | 프레임워크가 제공하는 클래스·인터페이스 |
+  | <#FEF3C7> EXT | 프레임워크 확장점을 구현하는 CILS 코드 |
+  | PORT | 직접 정의한 모듈 API 또는 저장소 인터페이스 |
+  | --> / ..> | 보유하는 협력자 / 사용 의존성 |
+  | ..|> | 인터페이스 구현 |
+  실제 필터 순서, SecurityFilterChain 설정, 단순 DTO 및 일부 저장소 구현은 생략.
+  사용자 ID는 subjectId(UUID), OIDC client ID는 clientId(String)로 통일.
+  메서드는 핵심 설계 계약을 요약한 것이며 완전한 Java API 명세가 아님.
+endlegend
+@enduml

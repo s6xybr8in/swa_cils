@@ -1,0 +1,51 @@
+
+@startuml
+title CILS - 로그인 유스케이스 다이어그램
+
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+
+actor "User" as User
+actor "Client Application" as Client
+
+rectangle "CILS (OIDC 인증 서버)" {
+
+    usecase "로그인" as Login
+    usecase "인증 요청 검증" as ValidateRequest
+    usecase "사용자 인증" as Authenticate
+    usecase "기존 SSO 세션으로 로그인" as SSO
+    usecase "인가 코드 발급" as IssueCode
+
+    usecase "인가 코드 교환" as ExchangeCode
+    usecase "인가 코드 및 PKCE 검증" as ValidateCode
+    usecase "토큰 발급" as IssueToken
+}
+
+User --> Login
+Client --> ExchangeCode
+
+Login ..> ValidateRequest : <<include>>
+Login ..> IssueCode : <<include>>
+
+Authenticate ..> Login : <<extend>>
+SSO ..> Login : <<extend>>
+
+ExchangeCode ..> ValidateCode : <<include>>
+ExchangeCode ..> IssueToken : <<include>>
+
+note right of Authenticate
+  유효한 SSO 세션이 없는 경우
+  사용자 자격 증명 검증
+end note
+
+note right of SSO
+  유효한 SSO 세션이 있는 경우
+  기존 인증 상태 활용
+end note
+
+note bottom of IssueToken
+  ID Token / Access Token / Refresh Token 발급
+end note
+
+@enduml
